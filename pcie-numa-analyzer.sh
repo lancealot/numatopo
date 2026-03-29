@@ -26,13 +26,16 @@ Analyze PCIe devices and group them by NUMA node.
 
 OPTIONS:
     -h, --help          Show this help message
+    -a, --all           Show all devices including bridges and infrastructure
     -v, --verbose       Show verbose output with additional device details
     -n, --no-color      Disable colored output
     -s, --summary       Show summary statistics only
 
 EXAMPLES:
-    $(basename "$0")                    # Basic listing
-    $(basename "$0") -v                 # Verbose output
+    $(basename "$0")                    # Physical devices only (default)
+    $(basename "$0") -a                 # All devices including bridges
+    $(basename "$0") -v                 # Verbose physical devices
+    $(basename "$0") -a -v              # Verbose all devices
     $(basename "$0") -s                 # Summary only
 
 EOF
@@ -42,12 +45,17 @@ EOF
 VERBOSE=false
 NO_COLOR=false
 SUMMARY_ONLY=false
+SHOW_ALL=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help)
             print_usage
             exit 0
+            ;;
+        -a|--all)
+            SHOW_ALL=true
+            shift
             ;;
         -v|--verbose)
             VERBOSE=true
@@ -125,9 +133,24 @@ get_device_class() {
     fi
 }
 
+# Function to check if a device class is infrastructure (filtered by default)
+# Base class is the top byte of the 24-bit class code (e.g., 0x060000 -> 06)
+is_infrastructure_device() {
+    local class_code=$1
+    local base_class="${class_code:2:2}"
+    case "$base_class" in
+        06) return 0 ;;  # Bridge (host, PCI-PCI, ISA, etc.)
+        08) return 0 ;;  # System peripheral (IOMMU, PIC, DMA, timer)
+        05) return 0 ;;  # Memory controller
+        13) return 0 ;;  # Non-Essential Instrumentation
+        *)  return 1 ;;
+    esac
+}
+
 # Declare associative arrays
 declare -A numa_devices
 declare -A numa_count
+filtered_count=0
 
 # Scan all PCIe devices
 echo -e "${CYAN}Scanning PCIe devices...${NC}"
@@ -143,9 +166,15 @@ for device in /sys/bus/pci/devices/*; do
             numa_node=$(cat "$device/numa_node" 2>/dev/null || echo "-1")
         fi
 
+        # Get device class and filter infrastructure devices by default
+        device_class=$(get_device_class "$device")
+        if [ "$SHOW_ALL" = false ] && is_infrastructure_device "$device_class"; then
+            ((filtered_count++))
+            continue
+        fi
+
         # Get device information
         vendor_device=$(get_vendor_device_info "$device")
-        device_class=$(get_device_class "$device")
         description=$(get_device_description "$pci_addr")
 
         # Build device info string
@@ -205,6 +234,9 @@ for numa_node in "${numa_nodes[@]}"; do
 done
 
 echo -e "${CYAN}Total PCIe devices: ${total_devices}${NC}"
+if [ "$SHOW_ALL" = false ] && [ "$filtered_count" -gt 0 ]; then
+    echo -e "${YELLOW}  (${filtered_count} infrastructure device(s) hidden, use -a to show all)${NC}"
+fi
 
 # Check if system has NUMA
 if [ ${#numa_nodes[@]} -eq 1 ] && [ "${numa_nodes[0]}" = "-1" ]; then
