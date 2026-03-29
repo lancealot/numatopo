@@ -4,12 +4,13 @@ A Linux shell script that analyzes PCIe devices on a system and groups them by t
 
 ## Features
 
-- Lists all PCIe devices on the system
+- Lists physical PCIe devices (NVMe, NICs, GPUs, storage controllers, etc.) by default
+- Automatically filters out infrastructure devices (bridges, IOMMU, system peripherals)
 - Groups devices by their associated NUMA node
 - Displays device information including PCI address and description
-- Provides summary statistics
+- Provides summary statistics with filtered device count
 - Colored output for better readability
-- Multiple output modes (standard, verbose, summary-only)
+- Multiple output modes (all, verbose, summary-only)
 
 ## Requirements
 
@@ -35,20 +36,26 @@ chmod +x pcie-numa-analyzer.sh
 ./pcie-numa-analyzer.sh
 ```
 
-This will display all PCIe devices grouped by NUMA node with basic information.
+By default, this shows only physical/endpoint devices (NVMe drives, NICs, GPUs, storage controllers, USB controllers, etc.), filtering out infrastructure like bridges, IOMMU, and system peripherals.
 
 ### Command Line Options
 
 - `-h, --help`: Display help message
+- `-a, --all`: Show all devices including bridges and infrastructure
 - `-v, --verbose`: Show verbose output with additional device details (vendor/device IDs, class codes)
 - `-n, --no-color`: Disable colored output (useful for piping to files)
 - `-s, --summary`: Show only summary statistics
 
 ### Examples
 
-**Basic listing:**
+**Physical devices only (default):**
 ```bash
 ./pcie-numa-analyzer.sh
+```
+
+**All devices including bridges:**
+```bash
+./pcie-numa-analyzer.sh -a
 ```
 
 **Verbose output with all device details:**
@@ -81,6 +88,20 @@ Each PCIe device is displayed with:
 - **NUMA Node N**: Devices are grouped under their respective NUMA node number (0, 1, 2, etc.)
 - **NUMA Node N/A**: Devices that don't have NUMA information or are on systems without NUMA support
 
+### Device Filtering
+
+By default, the script hides infrastructure devices based on PCI base class codes:
+
+| Base Class | Description | Filtered |
+|---|---|---|
+| `0x06` | Bridge (host, PCI-PCI, ISA, etc.) | Yes |
+| `0x08` | System peripheral (IOMMU, PIC, DMA) | Yes |
+| `0x05` | Memory controller | Yes |
+| `0x13` | Non-Essential Instrumentation | Yes |
+| All others | Storage, network, display, USB, etc. | No (shown) |
+
+Use `-a` to see all devices including infrastructure.
+
 ### Example Output
 
 ```
@@ -89,20 +110,26 @@ Each PCIe device is displayed with:
 ========================================
 
 NUMA Node: 0
-  0000:00:00.0 - Host bridge: Intel Corporation Device 1234
-  0000:00:1f.2 - SATA controller: Intel Corporation Device 5678
-  0000:01:00.0 - Network controller: Intel Corporation Ethernet Controller
+  0000:c1:00.0 - Non-Volatile memory controller: Micron Technology Inc 7500 PRO NVMe SSD
+  0000:c2:00.0 - Non-Volatile memory controller: Micron Technology Inc 7500 PRO NVMe SSD
+  0000:c3:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
+  0000:c5:00.2 - Encryption controller: Advanced Micro Devices, Inc. [AMD] Starship/Matisse PTDMA
+  0000:c6:00.2 - Encryption controller: Advanced Micro Devices, Inc. [AMD] Starship/Matisse PTDMA
 
-NUMA Node: 1
-  0000:80:00.0 - PCI bridge: Intel Corporation Device abcd
-  0000:81:00.0 - Network controller: Mellanox Technologies MT27800
+NUMA Node: 4
+  0000:41:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
+  0000:47:00.0 - USB controller: ASMedia Technology Inc. ASM1042A USB 3.0 Host Controller
+  0000:49:00.0 - VGA compatible controller: ASPEED Technology, Inc. ASPEED Graphics Family
+  0000:4b:00.0 - Ethernet controller: Broadcom Inc. NetXtreme BCM5720 Gigabit Ethernet PCIe
+  0000:4e:00.0 - SATA controller: Advanced Micro Devices, Inc. [AMD] FCH SATA Controller
 
 ========================================
   Summary
 ========================================
-NUMA Node 0: 3 device(s)
-NUMA Node 1: 2 device(s)
-Total PCIe devices: 5
+NUMA Node 0: 5 device(s)
+NUMA Node 4: 5 device(s)
+Total PCIe devices: 10
+  (90 infrastructure device(s) hidden, use -a to show all)
 ```
 
 ## How It Works
@@ -111,9 +138,10 @@ The script reads information from the Linux sysfs virtual filesystem:
 
 1. **Device enumeration**: Scans `/sys/bus/pci/devices/` for all PCIe devices
 2. **NUMA node detection**: Reads `/sys/bus/pci/devices/<device>/numa_node` for each device
-3. **Device details**: Retrieves vendor, device, and class information from sysfs
-4. **Description lookup**: Uses `lspci` if available for human-readable device names
-5. **Grouping and display**: Organizes devices by NUMA node and displays them
+3. **Infrastructure filtering**: Checks the PCI base class code from `/sys/bus/pci/devices/<device>/class` to filter out bridges and system peripherals (unless `-a` is used)
+4. **Device details**: Retrieves vendor, device, and class information from sysfs
+5. **Description lookup**: Uses `lspci` if available for human-readable device names
+6. **Grouping and display**: Organizes devices by NUMA node and displays them
 
 ## Understanding NUMA
 
