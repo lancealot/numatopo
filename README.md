@@ -94,15 +94,18 @@ By default, the script hides infrastructure devices based on PCI base class code
 
 | Base Class | Description | Filtered |
 |---|---|---|
+| `0x05` | Memory controller | Yes |
 | `0x06` | Bridge (host, PCI-PCI, ISA, etc.) | Yes |
 | `0x08` | System peripheral (IOMMU, PIC, DMA) | Yes |
-| `0x05` | Memory controller | Yes |
+| `0x10` | Encryption controller (e.g., AMD PTDMA/PSP) | Yes |
 | `0x13` | Non-Essential Instrumentation | Yes |
 | All others | Storage, network, display, USB, etc. | No (shown) |
 
 Use `-a` to see all devices including infrastructure.
 
 ### Example Output
+
+From an AMD EPYC Milan server with 4 NUMA nodes:
 
 ```
 ========================================
@@ -113,23 +116,36 @@ NUMA Node: 0
   0000:c1:00.0 - Non-Volatile memory controller: Micron Technology Inc 7500 PRO NVMe SSD
   0000:c2:00.0 - Non-Volatile memory controller: Micron Technology Inc 7500 PRO NVMe SSD
   0000:c3:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
-  0000:c5:00.2 - Encryption controller: Advanced Micro Devices, Inc. [AMD] Starship/Matisse PTDMA
-  0000:c6:00.2 - Encryption controller: Advanced Micro Devices, Inc. [AMD] Starship/Matisse PTDMA
+  0000:c4:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
+
+NUMA Node: 2
+  0000:81:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
+  0000:82:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
+  0000:83:00.0 - Non-Volatile memory controller: Micron Technology Inc 7500 PRO NVMe SSD
+  0000:84:00.0 - Non-Volatile memory controller: Micron Technology Inc 7500 PRO NVMe SSD
 
 NUMA Node: 4
   0000:41:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
   0000:47:00.0 - USB controller: ASMedia Technology Inc. ASM1042A USB 3.0 Host Controller
   0000:49:00.0 - VGA compatible controller: ASPEED Technology, Inc. ASPEED Graphics Family
   0000:4b:00.0 - Ethernet controller: Broadcom Inc. NetXtreme BCM5720 Gigabit Ethernet PCIe
+  0000:4b:00.1 - Ethernet controller: Broadcom Inc. NetXtreme BCM5720 Gigabit Ethernet PCIe
   0000:4e:00.0 - SATA controller: Advanced Micro Devices, Inc. [AMD] FCH SATA Controller
+
+NUMA Node: 6
+  0000:01:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
+  0000:02:00.0 - Non-Volatile memory controller: Intel Corporation PCIe Data Center SSD
+  0000:06:00.3 - USB controller: Advanced Micro Devices, Inc. [AMD] Starship USB 3.0 Host Controller
 
 ========================================
   Summary
 ========================================
-NUMA Node 0: 5 device(s)
-NUMA Node 4: 5 device(s)
-Total PCIe devices: 10
-  (90 infrastructure device(s) hidden, use -a to show all)
+NUMA Node 0: 4 device(s)
+NUMA Node 2: 4 device(s)
+NUMA Node 4: 6 device(s)
+NUMA Node 6: 3 device(s)
+Total PCIe devices: 17
+  (95 infrastructure device(s) hidden, use -a to show all)
 ```
 
 ## How It Works
