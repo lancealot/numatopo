@@ -142,6 +142,7 @@ is_infrastructure_device() {
         06) return 0 ;;  # Bridge (host, PCI-PCI, ISA, etc.)
         08) return 0 ;;  # System peripheral (IOMMU, PIC, DMA, timer)
         05) return 0 ;;  # Memory controller
+        10) return 0 ;;  # Encryption controller (e.g., AMD PTDMA/PSP)
         13) return 0 ;;  # Non-Essential Instrumentation
         *)  return 1 ;;
     esac
