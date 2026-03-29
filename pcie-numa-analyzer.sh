@@ -169,7 +169,7 @@ for device in /sys/bus/pci/devices/*; do
         # Get device class and filter infrastructure devices by default
         device_class=$(get_device_class "$device")
         if [ "$SHOW_ALL" = false ] && is_infrastructure_device "$device_class"; then
-            ((filtered_count++))
+            filtered_count=$((filtered_count + 1))
             continue
         fi
 
