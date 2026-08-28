@@ -8,6 +8,9 @@ A Linux shell script that analyzes PCIe devices on a system and groups them by t
 - Automatically filters out infrastructure devices (bridges, IOMMU, system peripherals)
 - Groups devices by their associated NUMA node
 - Displays device information including PCI address and description
+- Shows the bound kernel driver and kernel device names (e.g., `nvme0n1`, `ens1f0`, `sda`) for each device; flags devices with no driver bound
+- Maps devices to their physical motherboard slot designation (e.g., `CPU SLOT3 PCI-E 4.0 X16`) using SMBIOS data when run as root
+- Verbose mode shows PCIe link speed/width and flags links that trained below their maximum (`DEGRADED`)
 - Provides summary statistics with filtered device count
 - Colored output for better readability
 - Multiple output modes (all, verbose, summary-only)
@@ -17,6 +20,7 @@ A Linux shell script that analyzes PCIe devices on a system and groups them by t
 - Linux operating system with sysfs support
 - Bash shell
 - Optional: `lspci` utility for detailed device descriptions (part of `pciutils` package)
+- Optional: `dmidecode` and root privileges for motherboard slot designations
 
 ## Installation
 
@@ -42,7 +46,8 @@ By default, this shows only physical/endpoint devices (NVMe drives, NICs, GPUs, 
 
 - `-h, --help`: Display help message
 - `-a, --all`: Show all devices including bridges and infrastructure
-- `-v, --verbose`: Show verbose output with additional device details (vendor/device IDs, class codes)
+- `-b, --by-slot`: Group devices by physical motherboard slot — a top-down view of the system. Each slot heading notes its NUMA node; onboard devices (no slot) are grouped by NUMA node in a section below
+- `-v, --verbose`: Show verbose output with additional device details (vendor/device IDs, class codes, PCIe link speed/width)
 - `-n, --no-color`: Disable colored output (useful for piping to files)
 - `-s, --summary`: Show only summary statistics
 
@@ -80,8 +85,12 @@ By default, this shows only physical/endpoint devices (NVMe drives, NICs, GPUs, 
 Each PCIe device is displayed with:
 - **PCI Address**: The bus:device.function address (e.g., `0000:00:1f.2`)
 - **Description**: Human-readable device name (from lspci)
+- **Driver and kernel names**: The bound kernel driver and associated kernel device names, e.g. `[nvme: nvme3n1]`, `[tg3: eno1]`; a yellow `[no driver]` marks devices with nothing bound
+- **Motherboard slot**: The physical slot designation from SMBIOS, e.g. `[slot: CPU SLOT3 PCI-E 4.0 X16]` — matching what is printed on the motherboard silkscreen. Shown only for devices in slots the BIOS reports (onboard devices have no slot). Requires `dmidecode` and root; silently omitted otherwise. All functions of a multi-function card (e.g., both ports of a dual-port NIC) receive the same slot tag. Bifurcated slots (e.g., an x16 riser carrying multiple NVMe drives) are handled by joining the kernel's per-port slot numbers from `/sys/bus/pci/slots` with the SMBIOS slot IDs, so every device in the slot is labeled even though SMBIOS records only one bus address per slot. When a bifurcated port has no BIOS slot record of its own, the slot is inferred from topology: a bifurcated slot spans consecutive sibling root ports (functions of one parent device) starting at the port SMBIOS's Bus Address names, and the record's Data Bus Width bounds how many x4 devices fit. Each slot label extends upward from its anchor port to unlabeled devices of the same class within that lane budget, stopping at any port that already carries a label or a different device class. Connectors the BIOS describes only via PCIe Slot Capabilities (e.g., SlimSAS ports) get a raw `Slot N` label for their own bus — those firmware-internal numbers are never joined to SMBIOS slot IDs, since they need not match
+- **Onboard designation**: Devices named in SMBIOS type 41 (Onboard Devices Extended Information) are tagged e.g. `[onboard: ASPEED Video AST2500]`; disabled entries are ignored
 - **Vendor/Device IDs**: In verbose mode (e.g., `0x8086:0x9d03`)
 - **Class Code**: In verbose mode (e.g., `0x010601` for SATA controller)
+- **Link speed/width**: In verbose mode, e.g. `[16.0GT/s x8]`; a link that trained below its maximum is flagged as `DEGRADED(max ...)`. Note: a DEGRADED flag can be transient on power-managed (ASPM) links — verify under I/O load before reseating hardware
 
 ### NUMA Nodes
 
