@@ -209,22 +209,25 @@ done
 # the slot while multi-function cards occupy .1, .2, ... as well, so keys
 # drop the PCI function - every function of a card shares its slot.
 declare -A pci_slots
-declare -A dmi_slot_ids
+declare -A dmi_anchor_width
 if command -v dmidecode >/dev/null 2>&1; then
     dmi_slots=$(dmidecode -t 9 2>/dev/null) || dmi_slots=""
     slot_name=""
+    slot_width=""
     while IFS= read -r line; do
         line="${line#"${line%%[![:space:]]*}"}"  # trim leading whitespace
         case "$line" in
             Handle\ *)
                 slot_name=""
+                slot_width=""
                 ;;
             Designation:*)
                 slot_name="${line#*: }"
                 ;;
-            ID:*)
-                if [ -n "$slot_name" ]; then
-                    dmi_slot_ids["${line#*: }"]="$slot_name"
+            Data\ Bus\ Width:*)
+                # e.g. "8x or x8" -> 8 lanes
+                if [[ ${line#*: } =~ x([0-9]+)$ ]]; then
+                    slot_width="${BASH_REMATCH[1]}"
                 fi
                 ;;
             Bus\ Address:*)
@@ -232,18 +235,51 @@ if command -v dmidecode >/dev/null 2>&1; then
                 slot_addr="${slot_addr,,}"
                 if [ -n "$slot_name" ]; then
                     pci_slots["${slot_addr%.*}"]="$slot_name"
+                    dmi_anchor_width["${slot_addr%.*}"]="${slot_width:-0}"
                 fi
                 ;;
         esac
     done <<< "$dmi_slots"
 fi
 
-# A bifurcated slot (e.g. an x16 riser carrying multiple NVMe drives) puts
-# each drive on its own bus behind its own root port, but DMI records only
-# one Bus Address per slot. The kernel's per-port slot info under
-# /sys/bus/pci/slots (from PCIe Slot Capabilities / ACPI) covers every
-# port, all reporting the same physical slot number - join those numbers
-# with the DMI slot IDs to label every device in the slot.
+# Onboard device names from SMBIOS type 41 (Onboard Devices Extended
+# Information), e.g. the BMC's ASPEED VGA. Keyed by full function address;
+# disabled entries (which often carry phantom bus addresses) are skipped.
+declare -A pci_onboard
+if command -v dmidecode >/dev/null 2>&1; then
+    dmi_onboard=$(dmidecode -t 41 2>/dev/null) || dmi_onboard=""
+    ob_name=""
+    ob_enabled=true
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        case "$line" in
+            Handle\ *)
+                ob_name=""
+                ob_enabled=true
+                ;;
+            Reference\ Designation:*)
+                ob_name="${line#*: }"
+                ;;
+            Status:*Disabled*)
+                ob_enabled=false
+                ;;
+            Bus\ Address:*)
+                ob_addr="${line#*: }"
+                ob_addr="${ob_addr,,}"
+                if [ -n "$ob_name" ] && [ "$ob_enabled" = true ]; then
+                    pci_onboard["$ob_addr"]="$ob_name"
+                fi
+                ;;
+        esac
+    done <<< "$dmi_onboard"
+fi
+
+# The kernel's per-port slot info under /sys/bus/pci/slots (from PCIe Slot
+# Capabilities) also covers connectors DMI does not describe, e.g. SlimSAS
+# ports. Its slot numbers are firmware-internal and do NOT reliably match
+# DMI slot IDs (observed: SlimSAS ports numbered 2 and 27 alongside a DMI
+# "CPU SLOT2"), so they are used only as a raw fallback label for their
+# own bus, never joined to DMI designations.
 slots_dir="${PCI_SLOTS_DIR:-/sys/bus/pci/slots}"
 for slot_path in "$slots_dir"/*; do
     [ -r "$slot_path/address" ] || continue
@@ -252,65 +288,57 @@ for slot_path in "$slots_dir"/*; do
     [[ $slot_addr =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}$ ]] || continue
     slot_num="${slot_path##*/}"
     slot_num="${slot_num%%-*}"  # duplicate slot numbers get -1, -2 suffixes
-    slot_name="${dmi_slot_ids[$slot_num]:-Slot $slot_num}"
     # A direct DMI Bus Address entry wins when both name the same address
     if [ -z "${pci_slots[$slot_addr]:-}" ]; then
-        pci_slots[$slot_addr]="$slot_name"
+        pci_slots[$slot_addr]="Slot $slot_num"
     fi
 done
 
 pci_devices_dir="${PCI_DEVICES_DIR:-/sys/bus/pci/devices}"
 
-# Bifurcation siblings sometimes lack their own DMI/kernel slot records
-# entirely. Root ports feeding one physical slot are functions of the same
-# parent device (e.g. c0:01.3 and c0:01.4), so when every labeled device
-# behind one parent-device group agrees on a single slot, unlabeled
-# siblings inherit it - but only siblings of the SAME device class: a slot
-# holds one physical card, so bifurcation siblings are the same kind of
-# device (an NVMe riser carries NVMe drives), whereas an onboard USB
-# controller sharing the lane group with a labeled HBA is not in its slot.
-# Groups with conflicting labels are left alone rather than guessed at.
-declare -A group_label
-declare -A group_conflict
-declare -A group_class
-declare -A dev_group
-declare -A dev_class
+# Map each endpoint bus to its parent root port (device + function) and
+# its device class, for the slot propagation below.
+declare -A bus_parent
+declare -A bus_portfn
+declare -A bus_class
+declare -A port_bus
 for device in "$pci_devices_dir"/*; do
     [ -d "$device" ] || continue
     dev_addr=$(basename "$device")
+    bus_key="${dev_addr%.*}"
+    [ -n "${bus_parent[$bus_key]:-}" ] && continue
     real=$(readlink -f "$device" 2>/dev/null) || continue
-    if [[ $real =~ /([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])/[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
-        parent="${BASH_REMATCH[1]%.*}"
-        dev_group[$dev_addr]="$parent"
+    if [[ $real =~ /([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2})\.([0-7])/[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+        bus_parent[$bus_key]="${BASH_REMATCH[1]}"
+        bus_portfn[$bus_key]="${BASH_REMATCH[2]}"
         class_key=$(get_device_class "$device")
-        class_key="${class_key:2:4}"  # base+sub class, e.g. 0108 = NVMe
-        dev_class[$dev_addr]="$class_key"
-        slot_name="${pci_slots[${dev_addr%.*}]:-}"
-        if [ -n "$slot_name" ]; then
-            if [ -z "${group_label[$parent]:-}" ]; then
-                group_label[$parent]="$slot_name"
-            elif [ "${group_label[$parent]}" != "$slot_name" ]; then
-                group_conflict[$parent]=1
-            fi
-            case " ${group_class[$parent]:-} " in
-                *" ${class_key} "*) : ;;
-                *) group_class[$parent]="${group_class[$parent]:-}${group_class[$parent]:+ }${class_key}" ;;
-            esac
-        fi
+        bus_class[$bus_key]="${class_key:2:4}"  # base+sub class, 0108 = NVMe
+        port_bus["${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"]="$bus_key"
     fi
 done
-for dev_addr in "${!dev_group[@]}"; do
-    slot_key="${dev_addr%.*}"
-    if [ -z "${pci_slots[$slot_key]:-}" ]; then
-        parent="${dev_group[$dev_addr]}"
-        if [ -n "${group_label[$parent]:-}" ] && [ -z "${group_conflict[$parent]:-}" ]; then
-            case " ${group_class[$parent]} " in
-                *" ${dev_class[$dev_addr]} "*)
-                    pci_slots[$slot_key]="${group_label[$parent]}"
-                    ;;
-            esac
-        fi
-    fi
+
+# A bifurcated slot spans consecutive sibling root ports (functions of one
+# parent device) starting at the port DMI's Bus Address names, and its
+# "Data Bus Width" bounds how many x4 devices fit in it. Extend each DMI
+# slot label upward from its anchor port to unlabeled same-class devices
+# within that lane budget, stopping at any port that already carries a
+# label or holds a different device class. Kernel SltCap labels never
+# propagate: those connectors (e.g. SlimSAS x4) carry one bus each.
+for anchor in "${!dmi_anchor_width[@]}"; do
+    parent="${bus_parent[$anchor]:-}"
+    [ -n "$parent" ] || continue
+    budget=$(( ${dmi_anchor_width[$anchor]} / 4 - 1 ))
+    [ "$budget" -gt 0 ] || continue
+    anchor_class="${bus_class[$anchor]:-}"
+    for (( fn = ${bus_portfn[$anchor]} + 1; fn <= 7; fn++ )); do
+        sibling="${port_bus[${parent}.${fn}]:-}"
+        [ -n "$sibling" ] || continue                # gap in port numbering
+        [ -z "${pci_slots[$sibling]:-}" ] || break   # next slot/connector
+        [ "${bus_class[$sibling]:-}" = "$anchor_class" ] || break
+        pci_slots[$sibling]="${pci_slots[$anchor]}"
+        budget=$(( budget - 1 ))
+        [ "$budget" -gt 0 ] || break
+    done
 done
 
 # Declare associative arrays
@@ -373,6 +401,12 @@ for device in "$pci_devices_dir"/*; do
             slot_tag=" ${BLUE}[slot: ${slot_name}]${NC}"
         fi
 
+        # Onboard device designation from SMBIOS type 41
+        onboard_tag=""
+        if [ -z "$slot_name" ] && [ -n "${pci_onboard[$pci_addr]:-}" ]; then
+            onboard_tag=" ${BLUE}[onboard: ${pci_onboard[$pci_addr]}]${NC}"
+        fi
+
         # Build device info string (in by-slot mode the slot is the group
         # heading, so the per-line slot tag is dropped as redundant)
         if [ "$VERBOSE" = true ]; then
@@ -383,6 +417,7 @@ for device in "$pci_devices_dir"/*; do
         if [ "$BY_SLOT" = false ]; then
             device_info="${device_info}${slot_tag}"
         fi
+        device_info="${device_info}${onboard_tag}"
 
         # Count every device toward its NUMA node for the summary
         numa_count[$numa_node]=$((${numa_count[$numa_node]:-0} + 1))
