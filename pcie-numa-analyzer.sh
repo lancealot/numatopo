@@ -201,18 +201,25 @@ done
 # the slot while multi-function cards occupy .1, .2, ... as well, so keys
 # drop the PCI function - every function of a card shares its slot.
 declare -A pci_slots
+declare -A dmi_slot_ids
 if command -v dmidecode >/dev/null 2>&1; then
     dmi_slots=$(dmidecode -t 9 2>/dev/null) || dmi_slots=""
     slot_name=""
     while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"  # trim leading whitespace
         case "$line" in
             Handle\ *)
                 slot_name=""
                 ;;
-            *Designation:*)
+            Designation:*)
                 slot_name="${line#*: }"
                 ;;
-            *"Bus Address:"*)
+            ID:*)
+                if [ -n "$slot_name" ]; then
+                    dmi_slot_ids["${line#*: }"]="$slot_name"
+                fi
+                ;;
+            Bus\ Address:*)
                 slot_addr="${line#*: }"
                 slot_addr="${slot_addr,,}"
                 if [ -n "$slot_name" ]; then
@@ -222,6 +229,27 @@ if command -v dmidecode >/dev/null 2>&1; then
         esac
     done <<< "$dmi_slots"
 fi
+
+# A bifurcated slot (e.g. an x16 riser carrying multiple NVMe drives) puts
+# each drive on its own bus behind its own root port, but DMI records only
+# one Bus Address per slot. The kernel's per-port slot info under
+# /sys/bus/pci/slots (from PCIe Slot Capabilities / ACPI) covers every
+# port, all reporting the same physical slot number - join those numbers
+# with the DMI slot IDs to label every device in the slot.
+slots_dir="${PCI_SLOTS_DIR:-/sys/bus/pci/slots}"
+for slot_path in "$slots_dir"/*; do
+    [ -r "$slot_path/address" ] || continue
+    slot_addr=$(cat "$slot_path/address" 2>/dev/null) || continue
+    slot_addr="${slot_addr,,}"
+    [[ $slot_addr =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}$ ]] || continue
+    slot_num="${slot_path##*/}"
+    slot_num="${slot_num%%-*}"  # duplicate slot numbers get -1, -2 suffixes
+    slot_name="${dmi_slot_ids[$slot_num]:-Slot $slot_num}"
+    # A direct DMI Bus Address entry wins when both name the same address
+    if [ -z "${pci_slots[$slot_addr]:-}" ]; then
+        pci_slots[$slot_addr]="$slot_name"
+    fi
+done
 
 # Declare associative arrays
 declare -A numa_devices
