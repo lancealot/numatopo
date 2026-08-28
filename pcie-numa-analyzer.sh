@@ -296,6 +296,35 @@ done
 
 pci_devices_dir="${PCI_DEVICES_DIR:-/sys/bus/pci/devices}"
 
+# A slotted card can carry a PCIe switch (e.g. a dual-controller HBA or a
+# multi-M.2 switch card): DMI then names the switch's upstream port, while
+# the real endpoints sit on deeper buses behind it. Everything downstream
+# of a labeled device is physically on that card, so walk each unlabeled
+# device's ancestor chain (nearest first) and inherit the first slot
+# label found.
+for device in "$pci_devices_dir"/*; do
+    [ -d "$device" ] || continue
+    dev_addr=$(basename "$device")
+    bus_key="${dev_addr%.*}"
+    [ -z "${pci_slots[$bus_key]:-}" ] || continue
+    real=$(readlink -f "$device" 2>/dev/null) || continue
+    ancestors=()
+    IFS='/' read -r -a path_parts <<< "$real"
+    for part in "${path_parts[@]}"; do
+        if [[ $part =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+            ancestors+=("$part")
+        fi
+    done
+    # The last element is the device itself; walk the rest nearest-first
+    for (( i = ${#ancestors[@]} - 2; i >= 0; i-- )); do
+        anc_key="${ancestors[$i]%.*}"
+        if [ -n "${pci_slots[$anc_key]:-}" ]; then
+            pci_slots[$bus_key]="${pci_slots[$anc_key]}"
+            break
+        fi
+    done
+done
+
 # Map each endpoint bus to its parent root port (device + function) and
 # its device class, for the slot propagation below.
 declare -A bus_parent
