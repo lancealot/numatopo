@@ -9,6 +9,7 @@ A Linux shell script that analyzes PCIe devices on a system and groups them by t
 - Groups devices by their associated NUMA node
 - Displays device information including PCI address and description
 - Shows the bound kernel driver and kernel device names (e.g., `nvme0n1`, `ens1f0`, `sda`) for each device; flags devices with no driver bound
+- Maps devices to their physical motherboard slot designation (e.g., `CPU SLOT3 PCI-E 4.0 X16`) using SMBIOS data when run as root
 - Verbose mode shows PCIe link speed/width and flags links that trained below their maximum (`DEGRADED`)
 - Provides summary statistics with filtered device count
 - Colored output for better readability
@@ -19,6 +20,7 @@ A Linux shell script that analyzes PCIe devices on a system and groups them by t
 - Linux operating system with sysfs support
 - Bash shell
 - Optional: `lspci` utility for detailed device descriptions (part of `pciutils` package)
+- Optional: `dmidecode` and root privileges for motherboard slot designations
 
 ## Installation
 
@@ -83,6 +85,7 @@ Each PCIe device is displayed with:
 - **PCI Address**: The bus:device.function address (e.g., `0000:00:1f.2`)
 - **Description**: Human-readable device name (from lspci)
 - **Driver and kernel names**: The bound kernel driver and associated kernel device names, e.g. `[nvme: nvme3n1]`, `[tg3: eno1]`; a yellow `[no driver]` marks devices with nothing bound
+- **Motherboard slot**: The physical slot designation from SMBIOS, e.g. `[slot: CPU SLOT3 PCI-E 4.0 X16]` — matching what is printed on the motherboard silkscreen. Shown only for devices in slots the BIOS reports (onboard devices have no slot). Requires `dmidecode` and root; silently omitted otherwise. All functions of a multi-function card (e.g., both ports of a dual-port NIC) receive the same slot tag
 - **Vendor/Device IDs**: In verbose mode (e.g., `0x8086:0x9d03`)
 - **Class Code**: In verbose mode (e.g., `0x010601` for SATA controller)
 - **Link speed/width**: In verbose mode, e.g. `[16.0GT/s x8]`; a link that trained below its maximum is flagged as `DEGRADED(max ...)`. Note: a DEGRADED flag can be transient on power-managed (ASPM) links — verify under I/O load before reseating hardware

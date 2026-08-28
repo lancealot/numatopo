@@ -195,6 +195,34 @@ for entry in /sys/class/block/*; do
     add_ifname "$entry"
 done
 
+# Map PCI address -> motherboard slot designation, from SMBIOS type 9
+# (System Slot Information) via dmidecode. Requires root; skipped silently
+# when dmidecode is unavailable or unprivileged. DMI reports function .0 of
+# the slot while multi-function cards occupy .1, .2, ... as well, so keys
+# drop the PCI function - every function of a card shares its slot.
+declare -A pci_slots
+if command -v dmidecode >/dev/null 2>&1; then
+    dmi_slots=$(dmidecode -t 9 2>/dev/null) || dmi_slots=""
+    slot_name=""
+    while IFS= read -r line; do
+        case "$line" in
+            Handle\ *)
+                slot_name=""
+                ;;
+            *Designation:*)
+                slot_name="${line#*: }"
+                ;;
+            *"Bus Address:"*)
+                slot_addr="${line#*: }"
+                slot_addr="${slot_addr,,}"
+                if [ -n "$slot_name" ]; then
+                    pci_slots["${slot_addr%.*}"]="$slot_name"
+                fi
+                ;;
+        esac
+    done <<< "$dmi_slots"
+fi
+
 # Declare associative arrays
 declare -A numa_devices
 declare -A numa_count
@@ -246,11 +274,18 @@ for device in /sys/bus/pci/devices/*; do
             fi
         fi
 
+        # Motherboard slot designation (keyed without the PCI function)
+        slot_tag=""
+        slot_name="${pci_slots[${pci_addr%.*}]:-}"
+        if [ -n "$slot_name" ]; then
+            slot_tag=" ${BLUE}[slot: ${slot_name}]${NC}"
+        fi
+
         # Build device info string
         if [ "$VERBOSE" = true ]; then
-            device_info="  ${GREEN}${pci_addr}${NC} - ${vendor_device} [${device_class}] - ${description}${dev_tag}${link_tag}"
+            device_info="  ${GREEN}${pci_addr}${NC} - ${vendor_device} [${device_class}] - ${description}${dev_tag}${link_tag}${slot_tag}"
         else
-            device_info="  ${GREEN}${pci_addr}${NC} - ${description}${dev_tag}"
+            device_info="  ${GREEN}${pci_addr}${NC} - ${description}${dev_tag}${slot_tag}"
         fi
 
         # Add to the appropriate NUMA node group
