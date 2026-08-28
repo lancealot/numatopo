@@ -265,11 +265,16 @@ pci_devices_dir="${PCI_DEVICES_DIR:-/sys/bus/pci/devices}"
 # entirely. Root ports feeding one physical slot are functions of the same
 # parent device (e.g. c0:01.3 and c0:01.4), so when every labeled device
 # behind one parent-device group agrees on a single slot, unlabeled
-# siblings inherit it. Groups with conflicting labels are left alone
-# rather than guessed at.
+# siblings inherit it - but only siblings of the SAME device class: a slot
+# holds one physical card, so bifurcation siblings are the same kind of
+# device (an NVMe riser carries NVMe drives), whereas an onboard USB
+# controller sharing the lane group with a labeled HBA is not in its slot.
+# Groups with conflicting labels are left alone rather than guessed at.
 declare -A group_label
 declare -A group_conflict
+declare -A group_class
 declare -A dev_group
+declare -A dev_class
 for device in "$pci_devices_dir"/*; do
     [ -d "$device" ] || continue
     dev_addr=$(basename "$device")
@@ -277,6 +282,9 @@ for device in "$pci_devices_dir"/*; do
     if [[ $real =~ /([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])/[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
         parent="${BASH_REMATCH[1]%.*}"
         dev_group[$dev_addr]="$parent"
+        class_key=$(get_device_class "$device")
+        class_key="${class_key:2:4}"  # base+sub class, e.g. 0108 = NVMe
+        dev_class[$dev_addr]="$class_key"
         slot_name="${pci_slots[${dev_addr%.*}]:-}"
         if [ -n "$slot_name" ]; then
             if [ -z "${group_label[$parent]:-}" ]; then
@@ -284,6 +292,10 @@ for device in "$pci_devices_dir"/*; do
             elif [ "${group_label[$parent]}" != "$slot_name" ]; then
                 group_conflict[$parent]=1
             fi
+            case " ${group_class[$parent]:-} " in
+                *" ${class_key} "*) : ;;
+                *) group_class[$parent]="${group_class[$parent]:-}${group_class[$parent]:+ }${class_key}" ;;
+            esac
         fi
     fi
 done
@@ -292,7 +304,11 @@ for dev_addr in "${!dev_group[@]}"; do
     if [ -z "${pci_slots[$slot_key]:-}" ]; then
         parent="${dev_group[$dev_addr]}"
         if [ -n "${group_label[$parent]:-}" ] && [ -z "${group_conflict[$parent]:-}" ]; then
-            pci_slots[$slot_key]="${group_label[$parent]}"
+            case " ${group_class[$parent]} " in
+                *" ${dev_class[$dev_addr]} "*)
+                    pci_slots[$slot_key]="${group_label[$parent]}"
+                    ;;
+            esac
         fi
     fi
 done
