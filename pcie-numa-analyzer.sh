@@ -148,6 +148,53 @@ is_infrastructure_device() {
     esac
 }
 
+# Function to get PCIe link speed/width for a device
+# Prints e.g. "16.0GT/s x8", with DEGRADED(...) appended when the link
+# trained below its maximum. Prints nothing when link info is unavailable.
+get_link_info() {
+    local d=$1 cs="" cw="" ms="" mw=""
+    [ -r "$d/current_link_speed" ] || return 0
+    cs=$(cat "$d/current_link_speed" 2>/dev/null) || cs=""
+    cw=$(cat "$d/current_link_width" 2>/dev/null) || cw=""
+    ms=$(cat "$d/max_link_speed" 2>/dev/null) || ms=""
+    mw=$(cat "$d/max_link_width" 2>/dev/null) || mw=""
+    # Values can read "Unknown speed" or width 0 when the link is down
+    [[ $cs =~ ^[0-9] && $cw =~ ^[1-9][0-9]*$ ]] || return 0
+    local out="${cs%% GT*}GT/s x${cw}"
+    # Integer parts of PCIe speeds (2,5,8,16,32,64) are all distinct, so
+    # integer comparison is enough to detect a downtrained link
+    if [[ $ms =~ ^[0-9] && $mw =~ ^[1-9][0-9]*$ ]] && \
+       { [ "${cs%%.*}" -lt "${ms%%.*}" ] || [ "$cw" -lt "$mw" ]; }; then
+        out="$out DEGRADED(max ${ms%% GT*}GT/s x${mw})"
+    fi
+    printf '%s' "$out"
+    return 0
+}
+
+# Map PCI address -> kernel device names (NICs, disks, NVMe namespaces).
+# The greedy match pins the LAST PCI address in the resolved sysfs path,
+# i.e. the endpoint itself rather than an upstream bridge.
+declare -A pci_ifnames
+add_ifname() {
+    local path name=${1##*/}
+    path=$(readlink -f "$1" 2>/dev/null) || return 0
+    if [[ $path =~ .*/([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])/ ]]; then
+        local addr=${BASH_REMATCH[1]}
+        pci_ifnames[$addr]="${pci_ifnames[$addr]:+${pci_ifnames[$addr]} }$name"
+    fi
+    return 0
+}
+
+for entry in /sys/class/net/*; do
+    [ -e "$entry" ] || continue
+    add_ifname "$entry"
+done
+for entry in /sys/class/block/*; do
+    [ -e "$entry" ] || continue
+    [ -e "$entry/partition" ] && continue  # skip sda1, nvme0n1p2, ...
+    add_ifname "$entry"
+done
+
 # Declare associative arrays
 declare -A numa_devices
 declare -A numa_count
@@ -178,11 +225,32 @@ for device in /sys/bus/pci/devices/*; do
         vendor_device=$(get_vendor_device_info "$device")
         description=$(get_device_description "$pci_addr")
 
+        # Bound kernel driver and kernel device names (nvme0n1, ens1f0, ...)
+        driver=""
+        if [ -L "$device/driver" ]; then
+            driver=$(basename "$(readlink "$device/driver")") || driver=""
+        fi
+        kernel_names="${pci_ifnames[$pci_addr]:-}"
+        if [ -n "$driver" ]; then
+            dev_tag=" ${CYAN}[${driver}${kernel_names:+: ${kernel_names}}]${NC}"
+        else
+            dev_tag=" ${YELLOW}[no driver]${NC}"
+        fi
+
+        # PCIe link speed/width (verbose only)
+        link_tag=""
+        if [ "$VERBOSE" = true ]; then
+            link_info=$(get_link_info "$device") || link_info=""
+            if [ -n "$link_info" ]; then
+                link_tag=" [${link_info/DEGRADED/${RED}DEGRADED}${NC}]"
+            fi
+        fi
+
         # Build device info string
         if [ "$VERBOSE" = true ]; then
-            device_info="  ${GREEN}${pci_addr}${NC} - ${vendor_device} [${device_class}] - ${description}"
+            device_info="  ${GREEN}${pci_addr}${NC} - ${vendor_device} [${device_class}] - ${description}${dev_tag}${link_tag}"
         else
-            device_info="  ${GREEN}${pci_addr}${NC} - ${description}"
+            device_info="  ${GREEN}${pci_addr}${NC} - ${description}${dev_tag}"
         fi
 
         # Add to the appropriate NUMA node group
@@ -191,7 +259,7 @@ for device in /sys/bus/pci/devices/*; do
             numa_count[$numa_node]=1
         else
             numa_devices[$numa_node]="${numa_devices[$numa_node]}"$'\n'"$device_info"
-            ((numa_count[$numa_node]++))
+            numa_count[$numa_node]=$((numa_count[$numa_node] + 1))
         fi
     fi
 done
