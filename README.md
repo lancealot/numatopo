@@ -46,6 +46,7 @@ By default, this shows only physical/endpoint devices (NVMe drives, NICs, GPUs, 
 
 - `-h, --help`: Display help message
 - `-a, --all`: Show all devices including bridges and infrastructure
+- `-b, --by-slot`: Group devices by physical motherboard slot — a top-down view of the system. Each slot heading notes its NUMA node; onboard devices (no slot) are grouped by NUMA node in a section below
 - `-v, --verbose`: Show verbose output with additional device details (vendor/device IDs, class codes, PCIe link speed/width)
 - `-n, --no-color`: Disable colored output (useful for piping to files)
 - `-s, --summary`: Show only summary statistics
@@ -85,7 +86,7 @@ Each PCIe device is displayed with:
 - **PCI Address**: The bus:device.function address (e.g., `0000:00:1f.2`)
 - **Description**: Human-readable device name (from lspci)
 - **Driver and kernel names**: The bound kernel driver and associated kernel device names, e.g. `[nvme: nvme3n1]`, `[tg3: eno1]`; a yellow `[no driver]` marks devices with nothing bound
-- **Motherboard slot**: The physical slot designation from SMBIOS, e.g. `[slot: CPU SLOT3 PCI-E 4.0 X16]` — matching what is printed on the motherboard silkscreen. Shown only for devices in slots the BIOS reports (onboard devices have no slot). Requires `dmidecode` and root; silently omitted otherwise. All functions of a multi-function card (e.g., both ports of a dual-port NIC) receive the same slot tag. Bifurcated slots (e.g., an x16 riser carrying multiple NVMe drives) are handled by joining the kernel's per-port slot numbers from `/sys/bus/pci/slots` with the SMBIOS slot IDs, so every device in the slot is labeled even though SMBIOS records only one bus address per slot
+- **Motherboard slot**: The physical slot designation from SMBIOS, e.g. `[slot: CPU SLOT3 PCI-E 4.0 X16]` — matching what is printed on the motherboard silkscreen. Shown only for devices in slots the BIOS reports (onboard devices have no slot). Requires `dmidecode` and root; silently omitted otherwise. All functions of a multi-function card (e.g., both ports of a dual-port NIC) receive the same slot tag. Bifurcated slots (e.g., an x16 riser carrying multiple NVMe drives) are handled by joining the kernel's per-port slot numbers from `/sys/bus/pci/slots` with the SMBIOS slot IDs, so every device in the slot is labeled even though SMBIOS records only one bus address per slot. When a bifurcated port has no BIOS slot record at all, the slot is inferred from siblings: root ports feeding one slot are functions of the same parent device, so if every labeled device behind that parent agrees on a single slot, unlabeled siblings inherit it (groups with conflicting labels are left untagged rather than guessed)
 - **Vendor/Device IDs**: In verbose mode (e.g., `0x8086:0x9d03`)
 - **Class Code**: In verbose mode (e.g., `0x010601` for SATA controller)
 - **Link speed/width**: In verbose mode, e.g. `[16.0GT/s x8]`; a link that trained below its maximum is flagged as `DEGRADED(max ...)`. Note: a DEGRADED flag can be transient on power-managed (ASPM) links — verify under I/O load before reseating hardware

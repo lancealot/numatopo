@@ -27,6 +27,8 @@ Analyze PCIe devices and group them by NUMA node.
 OPTIONS:
     -h, --help          Show this help message
     -a, --all           Show all devices including bridges and infrastructure
+    -b, --by-slot       Group devices by physical slot (top-down view);
+                        onboard devices are grouped by NUMA node below
     -v, --verbose       Show verbose output with additional device details
     -n, --no-color      Disable colored output
     -s, --summary       Show summary statistics only
@@ -34,6 +36,7 @@ OPTIONS:
 EXAMPLES:
     $(basename "$0")                    # Physical devices only (default)
     $(basename "$0") -a                 # All devices including bridges
+    $(basename "$0") -b                 # Grouped by physical slot
     $(basename "$0") -v                 # Verbose physical devices
     $(basename "$0") -a -v              # Verbose all devices
     $(basename "$0") -s                 # Summary only
@@ -46,6 +49,7 @@ VERBOSE=false
 NO_COLOR=false
 SUMMARY_ONLY=false
 SHOW_ALL=false
+BY_SLOT=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -55,6 +59,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -a|--all)
             SHOW_ALL=true
+            shift
+            ;;
+        -b|--by-slot)
+            BY_SLOT=true
             shift
             ;;
         -v|--verbose)
@@ -251,16 +259,56 @@ for slot_path in "$slots_dir"/*; do
     fi
 done
 
+pci_devices_dir="${PCI_DEVICES_DIR:-/sys/bus/pci/devices}"
+
+# Bifurcation siblings sometimes lack their own DMI/kernel slot records
+# entirely. Root ports feeding one physical slot are functions of the same
+# parent device (e.g. c0:01.3 and c0:01.4), so when every labeled device
+# behind one parent-device group agrees on a single slot, unlabeled
+# siblings inherit it. Groups with conflicting labels are left alone
+# rather than guessed at.
+declare -A group_label
+declare -A group_conflict
+declare -A dev_group
+for device in "$pci_devices_dir"/*; do
+    [ -d "$device" ] || continue
+    dev_addr=$(basename "$device")
+    real=$(readlink -f "$device" 2>/dev/null) || continue
+    if [[ $real =~ /([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])/[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; then
+        parent="${BASH_REMATCH[1]%.*}"
+        dev_group[$dev_addr]="$parent"
+        slot_name="${pci_slots[${dev_addr%.*}]:-}"
+        if [ -n "$slot_name" ]; then
+            if [ -z "${group_label[$parent]:-}" ]; then
+                group_label[$parent]="$slot_name"
+            elif [ "${group_label[$parent]}" != "$slot_name" ]; then
+                group_conflict[$parent]=1
+            fi
+        fi
+    fi
+done
+for dev_addr in "${!dev_group[@]}"; do
+    slot_key="${dev_addr%.*}"
+    if [ -z "${pci_slots[$slot_key]:-}" ]; then
+        parent="${dev_group[$dev_addr]}"
+        if [ -n "${group_label[$parent]:-}" ] && [ -z "${group_conflict[$parent]:-}" ]; then
+            pci_slots[$slot_key]="${group_label[$parent]}"
+        fi
+    fi
+done
+
 # Declare associative arrays
 declare -A numa_devices
 declare -A numa_count
+declare -A slot_devices
+declare -A slot_numa
 filtered_count=0
 
 # Scan all PCIe devices
 echo -e "${CYAN}Scanning PCIe devices...${NC}"
 echo
 
-for device in /sys/bus/pci/devices/*; do
+for device in "$pci_devices_dir"/*; do
     if [ -d "$device" ]; then
         pci_addr=$(basename "$device")
         numa_node=-1
@@ -309,29 +357,83 @@ for device in /sys/bus/pci/devices/*; do
             slot_tag=" ${BLUE}[slot: ${slot_name}]${NC}"
         fi
 
-        # Build device info string
+        # Build device info string (in by-slot mode the slot is the group
+        # heading, so the per-line slot tag is dropped as redundant)
         if [ "$VERBOSE" = true ]; then
-            device_info="  ${GREEN}${pci_addr}${NC} - ${vendor_device} [${device_class}] - ${description}${dev_tag}${link_tag}${slot_tag}"
+            device_info="  ${GREEN}${pci_addr}${NC} - ${vendor_device} [${device_class}] - ${description}${dev_tag}${link_tag}"
         else
-            device_info="  ${GREEN}${pci_addr}${NC} - ${description}${dev_tag}${slot_tag}"
+            device_info="  ${GREEN}${pci_addr}${NC} - ${description}${dev_tag}"
+        fi
+        if [ "$BY_SLOT" = false ]; then
+            device_info="${device_info}${slot_tag}"
         fi
 
-        # Add to the appropriate NUMA node group
-        if [ -z "${numa_devices[$numa_node]}" ]; then
-            numa_devices[$numa_node]="$device_info"
-            numa_count[$numa_node]=1
+        # Count every device toward its NUMA node for the summary
+        numa_count[$numa_node]=$((${numa_count[$numa_node]:-0} + 1))
+
+        # Group under the slot (by-slot mode) or under the NUMA node
+        if [ "$BY_SLOT" = true ] && [ -n "$slot_name" ]; then
+            if [ -z "${slot_devices[$slot_name]:-}" ]; then
+                slot_devices[$slot_name]="$device_info"
+            else
+                slot_devices[$slot_name]="${slot_devices[$slot_name]}"$'\n'"$device_info"
+            fi
+            case " ${slot_numa[$slot_name]:-} " in
+                *" ${numa_node} "*) : ;;
+                *) slot_numa[$slot_name]="${slot_numa[$slot_name]:-}${slot_numa[$slot_name]:+ }${numa_node}" ;;
+            esac
         else
-            numa_devices[$numa_node]="${numa_devices[$numa_node]}"$'\n'"$device_info"
-            numa_count[$numa_node]=$((numa_count[$numa_node] + 1))
+            if [ -z "${numa_devices[$numa_node]:-}" ]; then
+                numa_devices[$numa_node]="$device_info"
+            else
+                numa_devices[$numa_node]="${numa_devices[$numa_node]}"$'\n'"$device_info"
+            fi
         fi
     fi
 done
 
-# Sort NUMA nodes
-numa_nodes=($(for key in "${!numa_devices[@]}"; do echo "$key"; done | sort -n))
+# Sort NUMA nodes (from numa_count, which covers slotted devices too)
+numa_nodes=()
+if [ ${#numa_count[@]} -gt 0 ]; then
+    mapfile -t numa_nodes < <(printf '%s\n' "${!numa_count[@]}" | sort -n)
+fi
 
 # Display results
-if [ "$SUMMARY_ONLY" = false ]; then
+if [ "$SUMMARY_ONLY" = false ] && [ "$BY_SLOT" = true ]; then
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}  PCIe Devices Grouped by Slot${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo
+
+    if [ ${#slot_devices[@]} -gt 0 ]; then
+        mapfile -t slot_names < <(printf '%s\n' "${!slot_devices[@]}" | sort -V)
+        for slot_name in "${slot_names[@]}"; do
+            slot_nodes="${slot_numa[$slot_name]// /, }"
+            slot_nodes="${slot_nodes//-1/N\/A}"
+            echo -e "${YELLOW}Slot: ${slot_name} [NUMA Node: ${slot_nodes}]${NC}"
+            echo -e "${slot_devices[$slot_name]}"
+            echo
+        done
+    else
+        echo -e "${YELLOW}No devices with slot information found.${NC}"
+        echo
+    fi
+
+    if [ ${#numa_devices[@]} -gt 0 ]; then
+        echo -e "${BLUE}Onboard / No Slot Info (grouped by NUMA node)${NC}"
+        echo
+        for numa_node in "${numa_nodes[@]}"; do
+            [ -n "${numa_devices[$numa_node]:-}" ] || continue
+            if [ "$numa_node" = "-1" ]; then
+                echo -e "${YELLOW}NUMA Node: N/A (No NUMA or shared)${NC}"
+            else
+                echo -e "${YELLOW}NUMA Node: ${numa_node}${NC}"
+            fi
+            echo -e "${numa_devices[$numa_node]}"
+            echo
+        done
+    fi
+elif [ "$SUMMARY_ONLY" = false ]; then
     echo -e "${BLUE}========================================${NC}"
     echo -e "${BLUE}  PCIe Devices Grouped by NUMA Node${NC}"
     echo -e "${BLUE}========================================${NC}"
